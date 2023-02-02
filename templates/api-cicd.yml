@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  GithubRepository:
+    Type: String
+    Description: The name of the Github repository (e.g., username/reponame)
+  GithubBranch:
+    Type: String
+    Description: The name of the Github branch (e.g., main)
+    Default: main
+  CodeStarConnectionARN:
+    Type: String
+    Description: The ARN of the CodeStarConnection to Github
+  ServiceName:
+    Type: String
+    Default: awsegclub-devops-api
+    Description: A name for the ECS service
+  ClusterName:
+    Type: String
+    Description: A name for the ECS Cluster
+  RepositoryName:
+    Type: String
+    Default: awsegclub-devops-api
+    Description: A name for the ECR Repository that is used to register API Docker images
+  AWSAccountID:
+    Type: String
+    Description: AWS Account ID for the deployment
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "General Settings"
+        Parameters:
+          - AWSAccountID
+          - CodeStarConnectionARN
+      - Label:
+          default: "Github Settings"
+        Parameters:
+          - GithubRepository
+          - GithubBranch
+      - Label:
+          default: "ECS Settings"
+        Parameters:
+          - ClusterName
+          - ServiceName
+          - RepositoryName
+
+Resources:
+
+  PipelineArtifactStore:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+
+  ### CodePipeline
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: api-pipeline
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineArtifactStore
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt PipelineServiceRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              InputArtifacts: []
+              OutputArtifacts:
+                - Name: SourceArtifact
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: 1
+              RunOrder: 1
+              Configuration:
+                ConnectionArn: !Ref CodeStarConnectionARN
+                FullRepositoryId: !Ref GithubRepository
+                BranchName: !Ref GithubBranch
+                OutputArtifactFormat: CODE_ZIP
+                DetectChanges: true
+        - Name: Build
+          Actions:
+            - Name: Build
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref BuildProject
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              InputArtifacts:
+                - Name: BuildArtifact
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: 1
+              Configuration:
+                ClusterName: !Ref ClusterName
+                ServiceName: !Ref ServiceName
+                FileName: imagedefinitions.json
+
+  ### CodeBuild
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: api-buildproject
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:4.0
+        Type: LINUX_CONTAINER ### Always check AWS Region Availability
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWSAccountID
+          - Name: IMAGE_ID
+            Value: !Ref RepositoryName
+      ServiceRole: !GetAtt BuildProjectServiceRole.Arn
+      Source:
+        Type: CODEPIPELINE
+
+  ### IAM Roles
+  PipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: api-pipeline-service-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: 
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  BuildProjectServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: api-buildproject-service-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: 
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
